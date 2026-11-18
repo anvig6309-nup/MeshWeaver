@@ -1,6 +1,4 @@
-# MeshWeaver
-Zero-dependency peer-to-peer asynchronous task broker for distributed computing, job scheduling, and resilient mesh networking.
-@"
+
 # MeshWeaver - Zero-Dependency P2P Async Task Broker
 
 A decentralized task queue in pure Python. No Redis, no RabbitMQ, no central broker.
@@ -25,4 +23,3 @@ If a node dies, the network detects the lost heartbeat and reassigns the task.
 
 - Mesh setup: asyncio UDP server/client so two Python instances can ping each other
 - Task serialization: use cloudpickle to send a function over the socket and run it remotely
-"@ | Set-Content README.md
