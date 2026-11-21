@@ -17,7 +17,7 @@ with `cloudpickle`.
 
 | Track | Deliverable | Status |
 |-------|-------------|--------|
-| Peer Discovery | 160-bit node IDs, routing table, bootstrap, peer exchange | Done |
+| Peer Discovery | 256-bit node IDs, XOR buckets, bootstrap, peer exchange and reachability refresh | Done |
 | Gossip | 5-second CPU/RAM gossip, duplicate control, expiration | Done |
 
 Week 3 may add more complete failure detection, reassignment, and stronger security.
@@ -30,7 +30,7 @@ MeshWeaver/
     __init__.py
     mesh_node.py     # UDP PING/PONG mesh node
     task_node.py     # cloudpickle task serialization + TCP task transport
-    run_tests.py     # 13 unit/integration tests
+    run_tests.py     # Week 1 and Week 2 unit/integration tests
   demo_node.py       # start a node
   demo_client.py     # ping a node + run a function on it
   requirements.txt
@@ -81,7 +81,7 @@ Tasks use TCP because pickled functions can exceed a UDP datagram.
 
 ## Week 2 peer discovery
 
-Every `MeshNode` receives a 160-bit hexadecimal node ID generated from a SHA-256 digest
+Every `MeshNode` receives a 256-bit hexadecimal node ID generated from a SHA-256 digest
 of cryptographically random bytes. `PeerTable` maintains bounded Kademlia-inspired buckets
 and ranks peers using XOR distance.
 
@@ -89,7 +89,8 @@ and ranks peers using XOR distance.
 with `bootstrap_nodes=[("127.0.0.1", port)]`; afterwards, it learns addresses through
 peer exchanges rather than a global peer list. New peers are announced to existing peers.
 Malformed, oversized, duplicate, invalid-address, and self-peer entries are ignored or
-bounded. Peer-refresh requests run in a background asyncio task.
+bounded. The background refresh task pings known peers concurrently and removes peers
+after three consecutive failed probes.
 
 This is an educational, lightweight implementation and is not full Kademlia-compatible
 network protocol.
@@ -97,8 +98,10 @@ network protocol.
 ## Week 2 resource gossip
 
 `GossipEngine` collects real CPU and RAM percentages using `psutil` in an executor so
-resource sampling does not block the asyncio loop. It creates `GOSSIP_RESOURCE` messages
-every five seconds containing node ID, CPU, RAM, timestamp, sequence, and message ID.
+resource sampling does not block the asyncio loop. It publishes immediately at startup
+and then every five seconds using `GOSSIP_RESOURCE` messages containing node ID, CPU,
+RAM, timestamp, sequence, and message ID. New resource records are forwarded to peers;
+message IDs and per-node sequence numbers suppress duplicates and stale updates.
 
 Nodes maintain a resource table for discovered nodes. Sequences and message IDs reject
 duplicates and out-of-date updates. Records older than 30 seconds are removed or omitted

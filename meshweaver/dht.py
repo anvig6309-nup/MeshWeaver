@@ -8,7 +8,7 @@ from typing import Iterable
 
 
 def generate_node_id() -> str:
-    """Generate a 160-bit, cryptographically random node identifier."""
+    """Generate a 256-bit node identifier from cryptographically random input."""
     random_bytes = secrets.token_bytes(32)
     return hashlib.sha256(random_bytes).hexdigest()
 
@@ -85,10 +85,14 @@ class PeerTable:
         self._failures.pop(peer_id, None)
         return True
 
-    def mark_failure(self, peer_id: str) -> None:
+    def mark_failure(self, peer_id: str) -> bool:
         self._failures[peer_id] = self._failures.get(peer_id, 0) + 1
         if self._failures[peer_id] >= 3:
-            self.remove(peer_id)
+            return self.remove(peer_id)
+        return False
+
+    def mark_success(self, peer_id: str) -> None:
+        self._failures.pop(peer_id, None)
 
     def rank(self, target_id: str, limit: int = 50) -> list[tuple[str, str, int]]:
         if limit <= 0:

@@ -151,6 +151,26 @@ class GossipEngine:
                 except (OSError, RuntimeError):
                     pass
 
+    def share_with_peer(self, peer_id: str, host: str, port: int) -> None:
+        if self._sender is None:
+            return
+        for node_id, record in self.get_all_resources().items():
+            if node_id == peer_id:
+                continue
+            message = {
+                "type": "GOSSIP_RESOURCE",
+                "node_id": record.node_id,
+                "cpu_percent": record.cpu_percent,
+                "ram_percent": record.ram_percent,
+                "timestamp": record.timestamp,
+                "sequence": record.sequence,
+                "message_id": record.message_id,
+            }
+            try:
+                self._sender(message, (host, port))
+            except (OSError, RuntimeError):
+                pass
+
     async def start(self) -> None:
         if self._task is not None and not self._task.done():
             return

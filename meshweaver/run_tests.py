@@ -1,6 +1,7 @@
 """Week 1 tests. Run from the project root:  python -m meshweaver.run_tests"""
 
 import asyncio
+import socket
 import unittest
 
 from meshweaver import (
@@ -44,6 +45,19 @@ class TestMesh(unittest.TestCase):
                 self.assertIsNotNone(await a.ping("127.0.0.1", b.port))
         run(main())
 
+    def test_node_stop_is_idempotent(self):
+        async def main():
+            node = MeshNode()
+            await node.start()
+            transport = node._transport
+            transport_closed = node._transport_closed
+            await node.stop()
+            await node.stop()
+            self.assertIsNone(node._transport)
+            self.assertTrue(transport.is_closing())
+            self.assertTrue(transport_closed.done())
+        run(main())
+
 
 class TestSerialization(unittest.TestCase):
     def test_roundtrip_lambda_and_closure(self):
@@ -85,6 +99,15 @@ class TestDHT(unittest.TestCase):
         self.assertEqual(len(table.peers), 3)
         ranked = table.rank("10" * 32)
         self.assertEqual(ranked[0][0], "11" * 32)
+
+    def test_peer_is_removed_after_three_failed_probes(self):
+        peer_id = "11" * 32
+        table = PeerTable("00" * 32)
+        self.assertTrue(table.insert(peer_id, "127.0.0.1", 9001))
+        self.assertFalse(table.mark_failure(peer_id))
+        self.assertFalse(table.mark_failure(peer_id))
+        self.assertTrue(table.mark_failure(peer_id))
+        self.assertNotIn(peer_id, table.peers)
 
     def test_invalid_discovery_message_is_ignored(self):
         async def main():
@@ -135,9 +158,8 @@ class TestGossip(unittest.TestCase):
         async def main():
             async with MeshNode(gossip_interval=3600) as a:
                 async with MeshNode(gossip_interval=3600) as b:
-                    await a.ping("127.0.0.1", b.port)
                     message = await a.gossip.collect_local()
-                    a.gossip.forward(message)
+                    await b.ping("127.0.0.1", a.port)
                     await asyncio.sleep(0.10)
                     self.assertIn(a.node_id, b.gossip.records)
                     self.assertFalse(b.gossip.update(message))
@@ -145,24 +167,56 @@ class TestGossip(unittest.TestCase):
 
     def test_three_nodes_and_expiration(self):
         async def main():
-            async with MeshNode(gossip_interval=0.05, stale_after=0.20) as a:
+            async with MeshNode(gossip_interval=0.05, stale_after=1.0) as a:
                 async with MeshNode(
                     bootstrap_nodes=[("127.0.0.1", a.port)],
                     gossip_interval=0.05,
-                    stale_after=0.20,
+                    stale_after=1.0,
                 ) as b:
                     async with MeshNode(
                         bootstrap_nodes=[("127.0.0.1", b.port)],
                         gossip_interval=0.05,
-                        stale_after=0.20,
+                        stale_after=1.0,
                     ) as c:
-                        await asyncio.sleep(0.30)
-                        self.assertGreaterEqual(len(c.gossip.records), 2)
-                        message = await c.gossip.collect_local()
-                        self.assertIn(c.node_id, c.gossip.records)
+                        nodes = (a, b, c)
+                        node_ids = {node.node_id for node in nodes}
+
+                        async def wait_for_convergence():
+                            while not all(
+                                node_ids.issubset(node.gossip.get_all_resources())
+                                for node in nodes
+                            ):
+                                await asyncio.sleep(0.02)
+
+                        await asyncio.wait_for(wait_for_convergence(), timeout=2.0)
                         c.gossip.records[c.node_id].timestamp = 0
                         self.assertEqual(c.gossip.get_resource(c.node_id), None)
         run(main())
+
+    def test_refresh_removes_unreachable_peer(self):
+        async def main():
+            a = MeshNode(
+                gossip_interval=3600,
+                refresh_interval=0.02,
+                peer_timeout=0.03,
+            )
+            b = MeshNode(gossip_interval=3600, refresh_interval=0)
+            await a.start()
+            await b.start()
+            try:
+                await b.ping("127.0.0.1", a.port)
+                self.assertIn(b.node_id, a.peer_table.peers)
+                await b.stop()
+
+                async def wait_for_removal():
+                    while b.node_id in a.peer_table.peers:
+                        await asyncio.sleep(0.02)
+
+                await asyncio.wait_for(wait_for_removal(), timeout=1.0)
+                self.assertNotIn(b.node_id, a.peers)
+            finally:
+                await a.stop()
+                await b.stop()
 
     def test_gossip_stops_with_node_and_task_execution_survives(self):
         async def main():
@@ -181,6 +235,37 @@ class TestGossip(unittest.TestCase):
 
 
 class TestRemoteExecution(unittest.TestCase):
+    def test_fixed_port_start_failure_closes_udp_transport(self):
+        async def main():
+            blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            blocker.bind(("127.0.0.1", 0))
+            blocker.listen()
+            port = blocker.getsockname()[1]
+            node = TaskNode(port=port)
+            try:
+                with self.assertRaises(OSError):
+                    await node.start()
+                self.assertIsNone(node._transport)
+                self.assertIsNone(node._server)
+            finally:
+                await node.stop()
+                blocker.close()
+        run(main())
+
+    def test_repeated_start_and_stop_are_idempotent(self):
+        async def main():
+            node = TaskNode(gossip_interval=3600)
+            await node.start()
+            server = node._server
+            await node.start()
+            self.assertIs(node._server, server)
+            await node.stop()
+            await node.stop()
+            self.assertIsNone(node._server)
+            self.assertIsNone(node._transport)
+        run(main())
+
     def test_execute_lambda_remotely(self):
         async def main():
             async with TaskNode() as server, TaskNode() as client:

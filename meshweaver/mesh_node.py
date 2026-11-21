@@ -24,6 +24,9 @@ class _MeshProtocol(asyncio.DatagramProtocol):
     def connection_made(self, transport):
         self.transport = transport
 
+    def connection_lost(self, exc):
+        self.node._on_transport_lost(exc)
+
     def datagram_received(self, data, addr):
         self.node._on_datagram(data, addr)
 
@@ -43,6 +46,7 @@ class MeshNode:
         stale_after=30.0,
         refresh_interval=30.0,
         max_peers=256,
+        peer_timeout=1.0,
     ):
         self.host = host
         self.port = port
@@ -51,7 +55,9 @@ class MeshNode:
         self.peer_table = PeerTable(self.node_id, max_peers=max_peers)
         self.bootstrap_nodes = list(bootstrap_nodes or [])
         self.refresh_interval = refresh_interval
+        self.peer_timeout = peer_timeout
         self._transport = None
+        self._transport_closed = None
         self._pending = {}  # ping id -> Future
         self.gossip = GossipEngine(
             self.node_id,
@@ -67,6 +73,7 @@ class MeshNode:
         if self._transport is not None:
             return self
         loop = asyncio.get_running_loop()
+        self._transport_closed = loop.create_future()
         self._transport, _ = await loop.create_datagram_endpoint(
             lambda: _MeshProtocol(self), local_addr=(self.host, self.port)
         )
@@ -92,8 +99,16 @@ class MeshNode:
         self._background_tasks.clear()
         if self._transport is not None:
             self._transport.close()
+            if self._transport_closed is not None:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(self._transport_closed),
+                        timeout=1.0,
+                    )
+                except asyncio.TimeoutError:
+                    pass
             self._transport = None
-            await asyncio.sleep(0)
+            self._transport_closed = None
 
     async def __aenter__(self):
         return await self.start()
@@ -110,6 +125,10 @@ class MeshNode:
                     self._transport.sendto(raw, addr)
             except (TypeError, ValueError):
                 return
+
+    def _on_transport_lost(self, exc):
+        if self._transport_closed is not None and not self._transport_closed.done():
+            self._transport_closed.set_result(None)
 
     async def ping(self, host, port, timeout=2.0):
         """Ping a peer. Returns round-trip time in seconds, or None on timeout."""
@@ -157,21 +176,36 @@ class MeshNode:
         try:
             while True:
                 await asyncio.sleep(self.refresh_interval)
-                self._refresh_peers()
+                await self._refresh_peers()
         except asyncio.CancelledError:
             return
 
-    def _refresh_peers(self):
-        for peer_id, host, port in self.peer_table.rank(self.node_id, limit=20):
-            self._send(
-                {
-                    "type": "FIND_PEERS",
-                    "node_id": self.node_id,
-                    "target": self.node_id,
-                    "request_id": uuid.uuid4().hex,
-                },
-                (host, port),
-            )
+    async def _refresh_peers(self):
+        probes = [
+            self._probe_peer(peer_id, host, port)
+            for peer_id, host, port in self.peer_table.rank(self.node_id, limit=20)
+        ]
+        if probes:
+            await asyncio.gather(*probes)
+
+    async def _probe_peer(self, peer_id, host, port):
+        try:
+            response = await self.ping(host, port, timeout=self.peer_timeout)
+        except (OSError, ValueError):
+            response = None
+        if response is None:
+            if self.peer_table.mark_failure(peer_id):
+                self.peers.pop(peer_id, None)
+            return
+        self._send(
+            {
+                "type": "FIND_PEERS",
+                "node_id": self.node_id,
+                "target": self.node_id,
+                "request_id": uuid.uuid4().hex,
+            },
+            (host, port),
+        )
 
     def _announce_peer(self, peer_id, addr):
         host, port = addr
@@ -209,8 +243,13 @@ class MeshNode:
             except ValueError:
                 valid_peer_id = False
         if valid_peer_id:
-            self.peers[peer_id] = addr
-            self.peer_table.insert(peer_id, addr[0], addr[1])
+            known_peer = peer_id in self.peer_table.peers
+            inserted = self.peer_table.insert(peer_id, addr[0], addr[1])
+            if inserted:
+                self.peers[peer_id] = addr
+                self.peer_table.mark_success(peer_id)
+                if not known_peer:
+                    self.gossip.share_with_peer(peer_id, addr[0], addr[1])
 
         if mtype == "PING":
             self._send(
@@ -267,8 +306,11 @@ class MeshNode:
                     and isinstance(host, str)
                     and isinstance(port, int)
                 ):
-                    self.peer_table.insert(peer_id, host, port)
-                    self.peers[peer_id] = (host, port)
+                    known_peer = peer_id in self.peer_table.peers
+                    if self.peer_table.insert(peer_id, host, port):
+                        self.peers[peer_id] = (host, port)
+                        if not known_peer:
+                            self.gossip.share_with_peer(peer_id, host, port)
         elif mtype == "GOSSIP_RESOURCE":
             if self.gossip.update(msg):
                 self.gossip.forward(msg)
