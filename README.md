@@ -1,8 +1,8 @@
-# MeshWeaver - Zero-Dependency P2P Async Task Broker
+# MeshWeaver - Async P2P Task Broker
 
-A decentralized task queue in pure Python. No Redis, no RabbitMQ, no central broker.
-Nodes form a peer-to-peer mesh with `asyncio`, and ship Python functions to each other
-with `cloudpickle`.
+A decentralized task broker in Python with no Redis, RabbitMQ, or central broker.
+Nodes form a peer-to-peer mesh with `asyncio`, exchange resource information, and ship
+Python functions to each other with `cloudpickle`.
 
 **Domain:** Distributed Systems & Edge Computing
 
@@ -13,14 +13,20 @@ with `cloudpickle`.
 | Distributed Networking | asyncio UDP node; two instances ping each other | Done |
 | Task Execution & Reliability | cloudpickle serialization, SHA-256 integrity check, remote execution | Done |
 
-## Week 2 status
+## Week 2 — Completed
 
 | Track | Deliverable | Status |
 |-------|-------------|--------|
 | Peer Discovery | 256-bit node IDs, XOR buckets, bootstrap, peer exchange and reachability refresh | Done |
 | Gossip | 5-second CPU/RAM gossip, duplicate control, expiration | Done |
 
-Week 3 may add more complete failure detection, reassignment, and stronger security.
+Week 2 extends the Week 1 UDP/TCP node design without replacing its ping or remote task
+execution APIs. Automated coverage includes DHT, three-node discovery, resource gossip,
+peer failure removal, lifecycle cleanup, and remote task execution (27 tests).
+
+The DHT and gossip protocols are intentionally educational implementations, not
+production-grade or full Kademlia implementations. Future work can add stronger identity
+and message authentication, task reassignment, and more comprehensive failure handling.
 
 ## Project layout
 
@@ -28,11 +34,14 @@ Week 3 may add more complete failure detection, reassignment, and stronger secur
 MeshWeaver/
   meshweaver/
     __init__.py
-    mesh_node.py     # UDP PING/PONG mesh node
+    mesh_node.py     # UDP mesh, peer discovery, refresh, and gossip integration
+    dht.py           # XOR distance and bounded peer routing table
+    gossip.py        # CPU/RAM sampling and resource gossip
     task_node.py     # cloudpickle task serialization + TCP task transport
-    run_tests.py     # Week 1 and Week 2 unit/integration tests
+    run_tests.py     # Week 1 and Week 2 tests
   demo_node.py       # start a node
   demo_client.py     # ping a node + run a function on it
+  demo_week2.py      # three-node discovery and gossip demonstration
   requirements.txt
 ```
 
