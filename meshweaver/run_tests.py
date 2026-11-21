@@ -3,7 +3,15 @@
 import asyncio
 import unittest
 
-from meshweaver import MeshNode, TaskNode, RemoteTaskError, IntegrityError
+from meshweaver import (
+    MeshNode,
+    TaskNode,
+    RemoteTaskError,
+    IntegrityError,
+    PeerTable,
+    generate_node_id,
+    xor_distance,
+)
 from meshweaver.task_node import serialize_task, deserialize_task, sha256_hex
 
 
@@ -48,6 +56,128 @@ class TestSerialization(unittest.TestCase):
         payload, digest = serialize_task(len, [1, 2, 3])
         with self.assertRaises(IntegrityError):
             deserialize_task(payload[:-1] + b"X", digest)
+
+
+class TestDHT(unittest.TestCase):
+    def test_node_ids_are_unique(self):
+        ids = {generate_node_id() for _ in range(100)}
+        self.assertEqual(len(ids), 100)
+
+    def test_xor_distance(self):
+        first = "00" * 32
+        second = "ff" * 32
+        self.assertEqual(xor_distance(first, second), int("ff" * 32, 16))
+        with self.assertRaises(ValueError):
+            xor_distance("00", "0")
+
+    def test_peer_table_insert_duplicate_self_and_ranking(self):
+        local = "00" * 32
+        table = PeerTable(local)
+        peers = [
+            ("11" * 32, "127.0.0.1", 9001),
+            ("22" * 32, "127.0.0.1", 9002),
+            ("33" * 32, "127.0.0.1", 9003),
+        ]
+        for peer_id, host, port in peers:
+            self.assertTrue(table.insert(peer_id, host, port))
+        self.assertFalse(table.insert(local, "127.0.0.1", 9000))
+        self.assertTrue(table.insert(peers[0][0], "127.0.0.1", 9004))
+        self.assertEqual(len(table.peers), 3)
+        ranked = table.rank("10" * 32)
+        self.assertEqual(ranked[0][0], "11" * 32)
+
+    def test_invalid_discovery_message_is_ignored(self):
+        async def main():
+            async with MeshNode() as node:
+                node._transport.sendto(
+                    b'{"type":"PEERS_FOUND","node_id":"bad","peers":"wrong"}',
+                    ("127.0.0.1", node.port),
+                )
+                await asyncio.sleep(0.02)
+                self.assertEqual(len(node.peers), 0)
+        run(main())
+
+    def test_three_nodes_propagate_peers_bootstrapping_through_b(self):
+        async def main():
+            async with MeshNode(gossip_interval=3600) as a:
+                async with MeshNode(
+                    bootstrap_nodes=[("127.0.0.1", a.port)],
+                    gossip_interval=3600,
+                ) as b:
+                    await asyncio.sleep(0.05)
+                    async with MeshNode(
+                        bootstrap_nodes=[("127.0.0.1", b.port)],
+                        gossip_interval=3600,
+                    ) as c:
+                        await asyncio.sleep(0.15)
+                        self.assertIn(b.node_id, a.peers)
+                        self.assertIn(a.node_id, b.peers)
+                        self.assertIn(b.node_id, c.peers)
+                        self.assertIn(c.node_id, b.peers)
+                        self.assertIn(c.node_id, a.peers)
+        run(main())
+
+
+class TestGossip(unittest.TestCase):
+    def test_local_resource_metrics_are_collected_and_valid(self):
+        async def main():
+            async with MeshNode(gossip_interval=3600) as node:
+                message = await node.gossip.collect_local()
+                self.assertIn(message["node_id"], node.gossip.records)
+                record = node.gossip.records[message["node_id"]]
+                self.assertGreaterEqual(record.cpu_percent, 0)
+                self.assertLessEqual(record.cpu_percent, 100)
+                self.assertGreaterEqual(record.ram_percent, 0)
+                self.assertLessEqual(record.ram_percent, 100)
+        run(main())
+
+    def test_two_nodes_exchange_metrics_and_duplicate_is_ignored(self):
+        async def main():
+            async with MeshNode(gossip_interval=3600) as a:
+                async with MeshNode(gossip_interval=3600) as b:
+                    await a.ping("127.0.0.1", b.port)
+                    message = await a.gossip.collect_local()
+                    a.gossip.forward(message)
+                    await asyncio.sleep(0.10)
+                    self.assertIn(a.node_id, b.gossip.records)
+                    self.assertFalse(b.gossip.update(message))
+        run(main())
+
+    def test_three_nodes_and_expiration(self):
+        async def main():
+            async with MeshNode(gossip_interval=0.05, stale_after=0.20) as a:
+                async with MeshNode(
+                    bootstrap_nodes=[("127.0.0.1", a.port)],
+                    gossip_interval=0.05,
+                    stale_after=0.20,
+                ) as b:
+                    async with MeshNode(
+                        bootstrap_nodes=[("127.0.0.1", b.port)],
+                        gossip_interval=0.05,
+                        stale_after=0.20,
+                    ) as c:
+                        await asyncio.sleep(0.30)
+                        self.assertGreaterEqual(len(c.gossip.records), 2)
+                        message = await c.gossip.collect_local()
+                        self.assertIn(c.node_id, c.gossip.records)
+                        c.gossip.records[c.node_id].timestamp = 0
+                        self.assertEqual(c.gossip.get_resource(c.node_id), None)
+        run(main())
+
+    def test_gossip_stops_with_node_and_task_execution_survives(self):
+        async def main():
+            async with TaskNode(gossip_interval=3600) as server:
+                async with TaskNode(
+                    bootstrap_nodes=[("127.0.0.1", server.port)],
+                    gossip_interval=3600,
+                ) as client:
+                    self.assertFalse(client.gossip._task.done())
+                    result = await client.submit(
+                        "127.0.0.1", server.port, lambda x: x * 2, 21
+                    )
+                    self.assertEqual(result, 42)
+            self.assertTrue(client.gossip._task is None)
+        run(main())
 
 
 class TestRemoteExecution(unittest.TestCase):

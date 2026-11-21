@@ -81,8 +81,8 @@ async def _read_frame(reader):
 class TaskNode(MeshNode):
     """A MeshNode that can also receive tasks and submit tasks to peers."""
 
-    def __init__(self, host="127.0.0.1", port=0, node_id=None):
-        super().__init__(host, port, node_id)
+    def __init__(self, host="127.0.0.1", port=0, node_id=None, **kwargs):
+        super().__init__(host, port, node_id, **kwargs)
         self._server = None
         self.tasks_executed = 0
 
