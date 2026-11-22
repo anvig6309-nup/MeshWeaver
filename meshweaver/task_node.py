@@ -81,25 +81,18 @@ async def _read_frame(reader):
 class TaskNode(MeshNode):
     """A MeshNode that can also receive tasks and submit tasks to peers."""
 
-    def __init__(self, host="127.0.0.1", port=0, node_id=None, **kwargs):
-        super().__init__(host, port, node_id, **kwargs)
+    def __init__(self, host="127.0.0.1", port=0, node_id=None):
+        super().__init__(host, port, node_id)
         self._server = None
-        self._writers = set()
         self.tasks_executed = 0
 
     async def start(self):
-        if self._server is not None:
-            return self
         if self.port != 0:
             await super().start()
-            try:
-                self._server = await asyncio.start_server(
-                    self._handle_client, self.host, self.port
-                )
-                return self
-            except OSError:
-                await super().stop()
-                raise
+            self._server = await asyncio.start_server(
+                self._handle_client, self.host, self.port
+            )
+            return self
         # port 0: find a port that is free for BOTH UDP and TCP
         last_exc = None
         for _ in range(20):
@@ -120,27 +113,10 @@ class TaskNode(MeshNode):
             self._server.close()
             await self._server.wait_closed()
             self._server = None
-        writers = list(self._writers)
-        for writer in writers:
-            if not writer.is_closing():
-                writer.close()
-        if writers:
-            await asyncio.gather(
-                *(self._wait_for_writer(writer) for writer in writers),
-                return_exceptions=True,
-            )
         await super().stop()
-
-    @staticmethod
-    async def _wait_for_writer(writer):
-        try:
-            await writer.wait_closed()
-        except (ConnectionError, asyncio.CancelledError):
-            pass
 
     # ---------- receiving side ----------
     async def _handle_client(self, reader, writer):
-        self._writers.add(writer)
         try:
             header, payload = await _read_frame(reader)
             if header.get("type") != "TASK":
@@ -171,10 +147,11 @@ class TaskNode(MeshNode):
         except (asyncio.IncompleteReadError, ValueError, ConnectionError):
             pass  # malformed/aborted connection - drop it
         finally:
-            if not writer.is_closing():
-                writer.close()
-            await self._wait_for_writer(writer)
-            self._writers.discard(writer)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
 
     # ---------- sending side ----------
     async def submit(self, host, port, func, *args, timeout=30.0, **kwargs):
@@ -194,10 +171,6 @@ class TaskNode(MeshNode):
                 rheader, rpayload = await _read_frame(reader)
             finally:
                 writer.close()
-                try:
-                    await writer.wait_closed()
-                except (ConnectionError, asyncio.CancelledError):
-                    pass
             if rheader.get("type") == "ERROR":
                 info = json.loads(rpayload.decode("utf-8"))
                 if info["kind"] == "IntegrityError":
