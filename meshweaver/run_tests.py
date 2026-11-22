@@ -10,6 +10,7 @@ from meshweaver import (
     RemoteTaskError,
     IntegrityError,
     PeerTable,
+    generate_dht_node_id,
     generate_node_id,
     xor_distance,
 )
@@ -74,8 +75,14 @@ class TestSerialization(unittest.TestCase):
 
 class TestDHT(unittest.TestCase):
     def test_node_ids_are_unique(self):
-        ids = {generate_node_id() for _ in range(100)}
+        ids = {generate_dht_node_id() for _ in range(100)}
         self.assertEqual(len(ids), 100)
+        self.assertTrue(all(len(node_id) == 64 for node_id in ids))
+
+    def test_package_generate_node_id_keeps_kademlia_api(self):
+        node_id = generate_node_id()
+        self.assertIsInstance(node_id, int)
+        self.assertLess(node_id, 2**160)
 
     def test_xor_distance(self):
         first = "00" * 32
