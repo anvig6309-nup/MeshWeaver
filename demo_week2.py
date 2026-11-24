@@ -32,6 +32,7 @@ async def main():
                 print(f"C {c.node_id[:12]} bootstrapped through B on port {c.port}")
                 nodes = (a, b, c)
                 await wait_for_resource_convergence(nodes)
+                print(f"Resource gossip converged across all {len(nodes)} demo nodes.")
 
                 for name, node in zip(("A", "B", "C"), nodes):
                     print(
