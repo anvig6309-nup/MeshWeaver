@@ -12,7 +12,9 @@ async def wait_for_resource_convergence(nodes, timeout=15.0):
         if all(node_ids.issubset(node.gossip.get_all_resources()) for node in nodes):
             return
         await asyncio.sleep(0.1)
-    raise TimeoutError("resource gossip did not converge before the demo timeout")
+    raise TimeoutError(
+        f"Resource gossip did not converge for all demo nodes within {timeout:.1f} seconds"
+    )
 
 
 async def main():
