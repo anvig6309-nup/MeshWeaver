@@ -17,6 +17,12 @@ async def main():
     async with TaskNode() as me:
         rtt = await me.ping("127.0.0.1", peer_port)
         print("ping:", f"{rtt * 1000:.2f} ms" if rtt else "no reply")
+        if rtt is None:
+            print(
+                f"No response from port {peer_port}; start the peer with "
+                f"`python demo_node.py {peer_port}` before running this client."
+            )
+            return
         result = await me.submit("127.0.0.1", peer_port, fib, 90)
         print("fib(90) computed remotely =", result)
 
