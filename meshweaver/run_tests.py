@@ -3,6 +3,8 @@
 import asyncio
 import socket
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from meshweaver import (
     MeshNode,
@@ -14,6 +16,8 @@ from meshweaver import (
     generate_node_id,
     xor_distance,
 )
+from meshweaver.gossip import ResourceRecord
+from meshweaver.router import select_best_node
 from meshweaver.task_node import serialize_task, deserialize_task, sha256_hex
 
 
@@ -239,6 +243,45 @@ class TestGossip(unittest.TestCase):
                     self.assertEqual(result, 42)
             self.assertTrue(client.gossip._task is None)
         run(main())
+
+
+class TestRouter(unittest.TestCase):
+    def test_selects_lowest_cpu_then_ram_from_fresh_records(self):
+        now = 100.0
+        peers = SimpleNamespace(
+            interval=5.0,
+            records={
+                "higher-cpu": ResourceRecord(
+                    "higher-cpu", 20.0, 10.0, now, 1, "message-1"
+                ),
+                "higher-ram": ResourceRecord(
+                    "higher-ram", 10.0, 40.0, now, 1, "message-2"
+                ),
+                "best": ResourceRecord(
+                    "best", 10.0, 20.0, now, 1, "message-3"
+                ),
+                "stale": ResourceRecord(
+                    "stale", 0.0, 0.0, now - 16.0, 1, "message-4"
+                ),
+            },
+        )
+
+        with patch("meshweaver.router.time.time", return_value=now):
+            self.assertEqual(select_best_node(peers), "best")
+
+    def test_returns_none_when_every_record_is_stale(self):
+        now = 100.0
+        peers = SimpleNamespace(
+            interval=5.0,
+            records={
+                "stale": ResourceRecord(
+                    "stale", 1.0, 1.0, now - 16.0, 1, "message-1"
+                )
+            },
+        )
+
+        with patch("meshweaver.router.time.time", return_value=now):
+            self.assertIsNone(select_best_node(peers))
 
 
 class TestRemoteExecution(unittest.TestCase):
